@@ -26,17 +26,17 @@ public class Game {
     private final Board board = new Board();
     /** 骰子 —— 封装 Random */
     private final Dice dice = new Dice();
-    /** 四位玩家：红(0) 蓝(13) 黄(26) 绿(39) */
+    /** 四位玩家：蓝(1) 绿(14) 红(27) 黄(40) */
     private final List<Player> players = new ArrayList<>();
     /** 控制台输入，整个游戏共用一个 Scanner */
     private final Scanner scanner = new Scanner(System.in);
 
     public Game() {
-        // startOffset 决定每个玩家在 52 格轨道上的起点位置，均分 52 ÷ 4 = 13
-        players.add(new Player("Red", 0));
-        players.add(new Player("Blue", 13));
-        players.add(new Player("Yellow", 26));
-        players.add(new Player("Green", 39));
+        // startOffset 指向三角块旁边的同色起点格，四个起点相隔 13 格。
+        players.add(new Player("Blue", 1));
+        players.add(new Player("Green", 14));
+        players.add(new Player("Red", 27));
+        players.add(new Player("Yellow", 40));
     }
 
     /**
@@ -76,6 +76,12 @@ public class Game {
             System.out.println(currentPlayer.getName() + " moved piece " + selectedPiece.getNumber()
                     + " to " + board.describePosition(currentPlayer, selectedPiece) + ".");
 
+            if (result.jumped()) {
+                System.out.println("  ⤴ Jumped! (landed on own color square, auto-advanced 4)");
+            }
+            if (result.flew()) {
+                System.out.println("  ✈ Flew! (landed on fly point, teleported to paired square)");
+            }
             if (result.capturedPieces() > 0) {
                 System.out.println("Captured " + result.capturedPieces() + " opponent piece(s).");
             }
@@ -168,4 +174,3 @@ public class Game {
         return (currentPlayerIndex + 1) % players.size();
     }
 }
-

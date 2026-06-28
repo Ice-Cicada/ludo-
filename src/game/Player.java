@@ -9,7 +9,7 @@ import java.util.List;
  *
  * startOffset 是核心概念：Ludo/Flying Chess 的 52 格轨道被四个玩家均分，
  * 每个玩家的"起点"在轨道上的绝对位置不同：
- *   红=0, 蓝=13, 黄=26, 绿=39
+ *   蓝=1, 绿=14, 红=27, 黄=40
  *
  * 这个偏移被 {@link Board#absoluteTrackPosition(Player, Piece)} 使用：
  *   absoluteTrackPosition = (startOffset + piece.progress) % 52
@@ -21,7 +21,7 @@ import java.util.List;
  */
 public class Player {
     private final String name;
-    /** 该玩家起点在 52 格公共轨道上的绝对位置（红0 蓝13 黄26 绿39） */
+    /** 该玩家起点在 52 格公共轨道上的绝对位置（蓝1 绿14 红27 黄40） */
     private final int startOffset;
     private final List<Piece> pieces = new ArrayList<>();
 
@@ -56,4 +56,3 @@ public class Player {
         return true;
     }
 }
-
