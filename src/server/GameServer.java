@@ -23,6 +23,7 @@ public class GameServer {
     private final List<ClientHandler> clients = new ArrayList<>();
     private final Set<Integer> botIds = new HashSet<>();
     private final GameState gameState = new GameState();
+    private final RedisClient redis = new RedisClient("localhost", 6379);
     private volatile boolean running = true;
     private volatile boolean gameStarted = false;
 
@@ -130,6 +131,9 @@ public class GameServer {
             return;
         }
 
+        // 记录到历史
+        redis.pushHistory(gameState.getLastAction());
+
         // 成功 → 广播新状态
         afterMoveBroadcast();
     }
@@ -137,17 +141,23 @@ public class GameServer {
     /** 移动后的广播 + 机器人自动回合检测 */
     private synchronized void afterMoveBroadcast() {
         if (gameState.getPhase() == GameState.Phase.GAME_OVER) {
-            broadcast(gameState.buildStateJson());
+            broadcastState();
             broadcast(gameState.buildGameOverJson());
             System.out.println("游戏结束！获胜者: " + gameState.getWinnerName());
             return;
         }
-        broadcast(gameState.buildStateJson());
+        broadcastState();
 
         // 若当前玩家是机器人，自动执行回合
         if (isBot(gameState.getCurrentPlayer())) {
             scheduleBotTurn();
         }
+    }
+
+    /** 构建含历史记录的 STATE 并广播 */
+    private synchronized void broadcastState() {
+        List<String> history = redis.getHistory(20);
+        broadcast(gameState.buildStateJson(history));
     }
 
     // ---- 机器人 ----
@@ -199,7 +209,7 @@ public class GameServer {
         gameStarted = true;
         System.out.println("房主开始游戏！真人: " + clients.size() + ", 机器人: " + botIds.size());
         broadcast(gameState.buildStartGameJson());
-        broadcast(gameState.buildStateJson());
+        broadcastState();
 
         // 如果第一个回合是机器人，自动执行
         if (isBot(gameState.getCurrentPlayer())) {
@@ -222,7 +232,8 @@ public class GameServer {
 
                         // 自动掷骰
                         gameState.rollDice(botId);
-                        broadcast(gameState.buildStateJson());
+                        redis.pushHistory(gameState.getLastAction());
+                        broadcastState();
 
                         // 若无可移动子 → 已自动跳回合，继续检查下一位
                         if (gameState.getPhase() != GameState.Phase.WAITING_FOR_PIECE) {
@@ -242,6 +253,7 @@ public class GameServer {
                         int pieceNum = movable.get((int) (Math.random() * movable.size()));
 
                         gameState.movePiece(botId, pieceNum);
+                        redis.pushHistory(gameState.getLastAction());
                         afterMoveBroadcast();
 
                         if (gameState.getPhase() == GameState.Phase.GAME_OVER) return;

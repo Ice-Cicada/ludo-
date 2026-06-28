@@ -82,7 +82,10 @@ public class GameState {
 
         if (movablePieceNumbers.isEmpty()) {
             lastAction += "，没有棋子可以移动";
-            advanceTurn();
+            // 手动跳回合但不重置 currentDice，让客户端能显示掷出的点数
+            currentPlayerIndex = (currentPlayerIndex + 1) % players.size();
+            phase = Phase.WAITING_FOR_ROLL;
+            movablePieceNumbers.clear();
         } else {
             phase = Phase.WAITING_FOR_PIECE;
         }
@@ -164,8 +167,8 @@ public class GameState {
 
     // ---- JSON 构建（手动拼接，无外部依赖） ----
 
-    /** 构建完整 STATE 消息的 JSON */
-    public synchronized String buildStateJson() {
+    /** 构建完整 STATE 消息的 JSON（含历史记录） */
+    public synchronized String buildStateJson(List<String> history) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"STATE\",");
         sb.append("\"currentPlayer\":").append(currentPlayerIndex).append(",");
@@ -190,9 +193,23 @@ public class GameState {
             if (++idx < movablePieceNumbers.size()) sb.append(",");
         }
         sb.append("],");
-        sb.append("\"lastAction\":\"").append(escapeJson(lastAction)).append("\"");
+        sb.append("\"lastAction\":\"").append(escapeJson(lastAction)).append("\",");
+        sb.append("\"history\":[");
+        if (history != null) {
+            int hi = 0;
+            for (String h : history) {
+                sb.append("\"").append(escapeJson(h)).append("\"");
+                if (++hi < history.size()) sb.append(",");
+            }
+        }
+        sb.append("]");
         sb.append("}");
         return sb.toString();
+    }
+
+    /** 构建无历史的 STATE（向后兼容） */
+    public synchronized String buildStateJson() {
+        return buildStateJson(null);
     }
 
     /** 构建 START_GAME 消息的 JSON */

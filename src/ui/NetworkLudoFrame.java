@@ -11,6 +11,8 @@ import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
@@ -58,6 +60,7 @@ public class NetworkLudoFrame extends JFrame {
     private final JButton rollButton = new JButton("掷骰子");
     private final JButton botButton = new JButton("添加机器人");
     private final JButton startButton = new JButton("开始游戏");
+    private final JTextArea historyArea = new JTextArea();
 
     private boolean preGame = true;  // 游戏开始前为 true，开始后隐藏准备按钮
 
@@ -239,8 +242,8 @@ public class NetworkLudoFrame extends JFrame {
         final String finalDisplay = display;
         setStatusHtml(finalDisplay);
 
-        // 骰子显示
-        diceLabel.setText("骰子：" + (currentDice > 0 ? String.valueOf(currentDice) : "-"));
+        // 骰子显示（-1 表示解析失败）
+        diceLabel.setText("骰子：" + (currentDice >= 0 ? String.valueOf(currentDice) : "?"));
 
         // 当前玩家标签
         if (currentPlayerIndex < players.size()) {
@@ -249,11 +252,31 @@ public class NetworkLudoFrame extends JFrame {
             currentPlayerLabel.setForeground(BoardPanel.playerColor(cp));
         }
 
-        // 按钮状态
+        // 按钮状态（服务端校验回合，客户端只需判断是否为自己回合+ROLL阶段）
         boolean myTurn = currentPlayerIndex == myPlayerId
-                && phase.contains("WAITING_FOR_ROLL")
-                && currentDice == 0;  // 未掷骰
+                && phase.contains("WAITING_FOR_ROLL");
         rollButton.setEnabled(myTurn);
+
+        // 更新历史记录
+        String histStr = extractArray(json, "history");
+        if (histStr != null) {
+            StringBuilder histText = new StringBuilder();
+            // histStr 格式: "条目1","条目2","条目3"
+            // 逐个提取引号内的字符串
+            int pos = 0;
+            while (pos < histStr.length()) {
+                int qStart = histStr.indexOf('"', pos);
+                if (qStart < 0) break;
+                int qEnd = histStr.indexOf('"', qStart + 1);
+                if (qEnd < 0) break;
+                String entry = histStr.substring(qStart + 1, qEnd);
+                histText.append(entry).append("\n");
+                pos = qEnd + 1;
+            }
+            historyArea.setText(histText.toString());
+            // 自动滚到底部
+            historyArea.setCaretPosition(historyArea.getDocument().getLength());
+        }
 
         // 更新棋盘
         boardPanel.updateState(players, currentPlayerIndex, movablePieces);
@@ -288,38 +311,42 @@ public class NetworkLudoFrame extends JFrame {
     }
 
     private JPanel createSidePanel() {
-        JPanel sidePanel = new JPanel(new BorderLayout(10, 10));
+        JPanel sidePanel = new JPanel(new BorderLayout(0, 10));
         sidePanel.setBackground(new Color(246, 248, 250));
         sidePanel.setBorder(BorderFactory.createEmptyBorder(16, 8, 16, 16));
-        sidePanel.setPreferredSize(new Dimension(236, 1));
+        sidePanel.setPreferredSize(new Dimension(250, 1));
 
-        JPanel topPanel = new JPanel(new BorderLayout(0, 12));
-        topPanel.setOpaque(false);
+        // ---- 上半区：玩家信息 + 骰子 + 按钮 ----
+        JPanel northPanel = new JPanel(new BorderLayout(0, 8));
+        northPanel.setOpaque(false);
+
+        JPanel infoPanel = new JPanel(new BorderLayout(0, 4));
+        infoPanel.setOpaque(false);
         currentPlayerLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 24));
         currentPlayerLabel.setHorizontalAlignment(SwingConstants.CENTER);
         diceLabel.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 28));
         diceLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        topPanel.add(currentPlayerLabel, BorderLayout.NORTH);
-        topPanel.add(diceLabel, BorderLayout.CENTER);
+        infoPanel.add(currentPlayerLabel, BorderLayout.NORTH);
+        infoPanel.add(diceLabel, BorderLayout.CENTER);
 
-        rollButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 22));
+        rollButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 20));
         rollButton.setFocusPainted(false);
         rollButton.setBackground(new Color(17, 24, 39));
         rollButton.setForeground(Color.WHITE);
         rollButton.setEnabled(false);
         rollButton.addActionListener(e -> {
-            if (client != null) {
-                client.send("{\"type\":\"ROLL_DICE\"}");
-            }
+            if (client != null) client.send("{\"type\":\"ROLL_DICE\"}");
         });
-        topPanel.add(rollButton, BorderLayout.SOUTH);
+        infoPanel.add(rollButton, BorderLayout.SOUTH);
 
-        // 游戏开始前的准备按钮区域
-        JPanel prepPanel = new JPanel(new BorderLayout(8, 8));
+        northPanel.add(infoPanel, BorderLayout.NORTH);
+
+        // 准备按钮区
+        JPanel prepPanel = new JPanel(new BorderLayout(0, 6));
         prepPanel.setOpaque(false);
-        prepPanel.setBorder(BorderFactory.createEmptyBorder(16, 0, 0, 0));
+        prepPanel.setBorder(BorderFactory.createEmptyBorder(12, 0, 0, 0));
 
-        botButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 18));
+        botButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 16));
         botButton.setFocusPainted(false);
         botButton.setBackground(new Color(75, 85, 99));
         botButton.setForeground(Color.WHITE);
@@ -328,7 +355,7 @@ public class NetworkLudoFrame extends JFrame {
         });
         prepPanel.add(botButton, BorderLayout.NORTH);
 
-        startButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 18));
+        startButton.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 16));
         startButton.setFocusPainted(false);
         startButton.setBackground(new Color(22, 163, 74));
         startButton.setForeground(Color.WHITE);
@@ -338,19 +365,39 @@ public class NetworkLudoFrame extends JFrame {
         });
         prepPanel.add(startButton, BorderLayout.SOUTH);
 
-        statusLabel.setVerticalAlignment(SwingConstants.TOP);
-        statusLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 15));
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(20, 0, 0, 0));
-        statusLabel.setForeground(new Color(31, 41, 55));
+        northPanel.add(prepPanel, BorderLayout.SOUTH);
 
+        // ---- 中间：状态信息 ----
+        JPanel centerPanel = new JPanel(new BorderLayout(0, 6));
+        centerPanel.setOpaque(false);
+
+        statusLabel.setVerticalAlignment(SwingConstants.TOP);
+        statusLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(10, 0, 4, 0));
+        statusLabel.setForeground(new Color(31, 41, 55));
+        centerPanel.add(statusLabel, BorderLayout.NORTH);
+
+        // 历史记录面板
+        historyArea.setEditable(false);
+        historyArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        historyArea.setBackground(new Color(248, 250, 252));
+        historyArea.setForeground(new Color(55, 65, 81));
+        historyArea.setLineWrap(true);
+        historyArea.setWrapStyleWord(true);
+        JScrollPane historyScroll = new JScrollPane(historyArea);
+        historyScroll.setBorder(BorderFactory.createLineBorder(new Color(203, 213, 225)));
+        historyScroll.setPreferredSize(new Dimension(220, 180));
+        historyScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        centerPanel.add(historyScroll, BorderLayout.CENTER);
+
+        // ---- 底部：规则提示 ----
         JLabel hintLabel = new JLabel("<html><b>联机模式</b><br>房主（玩家0）可开始游戏<br>添加机器人补齐 4 人<br>5 或 6 起飞<br>⤴ 跳子 ✈ 飞棋<br>掷到 6 可再来一次</html>");
-        hintLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
-        hintLabel.setBorder(BorderFactory.createEmptyBorder(12, 0, 0, 0));
+        hintLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        hintLabel.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
         hintLabel.setForeground(new Color(75, 85, 99));
 
-        sidePanel.add(topPanel, BorderLayout.NORTH);
-        sidePanel.add(prepPanel, BorderLayout.CENTER);
-        sidePanel.add(statusLabel, BorderLayout.EAST);
+        sidePanel.add(northPanel, BorderLayout.NORTH);
+        sidePanel.add(centerPanel, BorderLayout.CENTER);
         sidePanel.add(hintLabel, BorderLayout.SOUTH);
         return sidePanel;
     }
