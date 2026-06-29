@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.function.Consumer;
 
@@ -39,7 +40,8 @@ public class GameClient {
      */
     public GameClient(String host, int port, Consumer<String> onMessage, Runnable onDisconnect)
             throws IOException {
-        this.socket = new Socket(host, port);
+        this.socket = new Socket();
+        this.socket.connect(new InetSocketAddress(host, port), 5000); // 5 秒超时
         this.out = new PrintWriter(socket.getOutputStream(), true);
         this.in = new BufferedReader(new InputStreamReader(socket.getInputStream(), "UTF-8"));
         this.onMessage = onMessage;

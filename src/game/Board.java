@@ -44,12 +44,17 @@ public class Board {
     private static final int JUMP_DISTANCE = 4;
 
     /**
-     * 飞棋配对：棋盘上两组对称的飞点，落在起点则飞向终点（仅向前触发）。
-     * 52 格轨道上 1/4 与 3/4 处一组，2/4 与 0/4 处一组。
+     * 飞棋配对：每个玩家各有一个专属飞点（起点后 3 步），向前飞 44 步。
+     * 蓝(1→4→48)、绿(14→17→9)、红(27→30→22)、黄(40→43→35)
+     *
+     * <p>之所以是 3 步：棋子从基地起飞后 progress=0，再走 3 步到 progress=3（即 abs=startOffset+3），
+     * 刚好触发飞棋。飞 44 步后到达距离家门跑道不远处（progress≈47），加速一圈。</p>
      */
     private static final Map<Integer, Integer> FLY_FROM_TO = Map.of(
-            13, 39,   // 1/4 组
-            26, 0     // 2/4 组
+             4, 48,   // 蓝方飞点（startOffset=1，起飞后走 3 步触发）
+            17,  9,   // 绿方飞点（startOffset=14，起飞后走 3 步触发）
+            30, 22,   // 红方飞点（startOffset=27，起飞后走 3 步触发）
+            43, 35    // 黄方飞点（startOffset=40，起飞后走 3 步触发）
     );
 
     /** 双向飞点映射（from→to 和 to→from 都可用，由 move() 中的方向检查决定是否触发） */
@@ -81,13 +86,14 @@ public class Board {
     }
 
     /**
-     * 执行移动：起飞 / 前进 → 踩子 → 跳子 → 踩子 → 飞棋 → 踩子。
+     * 执行移动：起飞 / 前进 → 踩子 → 飞棋（优先）→ 踩子 → 跳子 → 踩子。
      *
      * <p>跳子规则：棋子落在自己的同色格（每 4 格一个，分布在 52 格轨道上）时，
      * 自动再前进 {@value #JUMP_DISTANCE} 步。跳子不递归 —— 跳后不再检查跳子。</p>
      *
-     * <p>飞棋规则：棋子落在飞点（绝对位置 13↔39、26↔0）时，
-     * 飞向配对位置。仅当配对位置在棋子自身 progress 坐标中为"向前"时才触发。
+     * <p>飞棋规则：每个玩家各有一个专属飞点（起点后 3 步处）。
+     * 蓝: abs 4→48, 绿: abs 17→9, 红: abs 30→22, 黄: abs 43→35。
+     * 仅当配对位置在棋子自身 progress 坐标中为"向前"时才触发。
      * 飞棋不递归 —— 飞后不再检查飞棋。</p>
      *
      * @param player    当前玩家
@@ -114,21 +120,21 @@ public class Board {
         // 2. 移动后检查是否踩到对手棋子（仅当棋子仍在公共轨道上时）
         int captured = captureOpponents(player, piece, players);
 
-        // 3. 跳子：落在公共轨道上的同色格 → 自动前进 4 步（不递归）
-        if (canJump(player, piece)) {
-            piece.advance(JUMP_DISTANCE);
-            jumped = true;
-            captured += captureOpponents(player, piece, players);
-        }
-
-        // 4. 飞棋：落在公共轨道上的飞点 → 飞向配对位置（仅向前，不递归）
-        if (!jumped && piece.isOnSharedTrack()) {
+        // 3. 飞棋优先：落在飞点 → 传送到配对位置（不递归）
+        if (piece.isOnSharedTrack()) {
             int flySteps = getFlySteps(player, piece);
             if (flySteps > 0) {
                 piece.advance(flySteps);
                 flew = true;
                 captured += captureOpponents(player, piece, players);
             }
+        }
+
+        // 4. 跳子：未飞棋时，落在同色格 → 自动前进 4 步（不递归）
+        if (!flew && canJump(player, piece)) {
+            piece.advance(JUMP_DISTANCE);
+            jumped = true;
+            captured += captureOpponents(player, piece, players);
         }
 
         return new MoveResult(piece.isFinished(), captured, jumped, flew);

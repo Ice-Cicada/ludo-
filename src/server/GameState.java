@@ -31,6 +31,10 @@ public class GameState {
         GAME_OVER
     }
 
+    /** 颜色名称，按 slot 索引（0-3），供外部直接访问 */
+    public static final String[] COLOR_NAMES = {"蓝方", "绿方", "红方", "黄方"};
+    public static final int[] START_OFFSETS = {1, 14, 27, 40};
+
     private final Board board = new Board();
     private final Dice dice = new Dice();
     private final List<Player> players = new ArrayList<>();
@@ -41,12 +45,33 @@ public class GameState {
     private final Set<Integer> movablePieceNumbers = new HashSet<>();
     private int winnerId = -1;
     private String lastAction = "";
+    private int playerCount = 0; // 实际参与人数（1-4），initPlayers() 后生效
 
     public GameState() {
-        players.add(new Player("蓝方", 1));
-        players.add(new Player("绿方", 14));
-        players.add(new Player("红方", 27));
-        players.add(new Player("黄方", 40));
+        // 玩家列表在 initPlayers() 中动态创建
+    }
+
+    /**
+     * 根据实际参与人数初始化玩家列表。
+     * 在房主点击"开始游戏"时由 GameServer 调用。
+     *
+     * @param count 实际参与人数（1-4）
+     */
+    public synchronized void initPlayers(int count) {
+        if (count < 1 || count > 4) {
+            throw new IllegalArgumentException("玩家数必须在 1-4 之间");
+        }
+        players.clear();
+        for (int i = 0; i < count; i++) {
+            players.add(new Player(COLOR_NAMES[i], START_OFFSETS[i]));
+        }
+        playerCount = count;
+        currentPlayerIndex = 0;
+        currentDice = 0;
+        phase = Phase.WAITING_FOR_ROLL;
+        movablePieceNumbers.clear();
+        winnerId = -1;
+        lastAction = "";
     }
 
     // ---- 公开操作 ----
@@ -215,7 +240,8 @@ public class GameState {
     /** 构建 START_GAME 消息的 JSON */
     public String buildStartGameJson() {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\"type\":\"START_GAME\",\"players\":[");
+        sb.append("{\"type\":\"START_GAME\",\"playerCount\":").append(playerCount).append(",");
+        sb.append("\"players\":[");
         for (int i = 0; i < players.size(); i++) {
             Player p = players.get(i);
             sb.append("{\"name\":\"").append(escapeJson(p.getName()))
@@ -234,8 +260,14 @@ public class GameState {
 
     /** 构建 PLAYER_LEFT 消息的 JSON */
     public String buildPlayerLeftJson(int playerId) {
+        String name;
+        if (playerId >= 0 && playerId < players.size()) {
+            name = players.get(playerId).getName();
+        } else {
+            name = (playerId >= 0 && playerId < COLOR_NAMES.length) ? COLOR_NAMES[playerId] : "未知";
+        }
         return "{\"type\":\"PLAYER_LEFT\",\"playerId\":" + playerId
-                + ",\"playerName\":\"" + escapeJson(players.get(playerId).getName()) + "\"}";
+                + ",\"playerName\":\"" + escapeJson(name) + "\"}";
     }
 
     // ---- 辅助方法 ----
@@ -251,6 +283,15 @@ public class GameState {
     public String getWinnerName() { return winnerId >= 0 ? players.get(winnerId).getName() : ""; }
     public List<Player> getPlayers() { return players; }
     public String getLastAction() { return lastAction; }
+
+    /** 跳过当前玩家（不掷骰、不产生历史记录），用于空闲位置 */
+    public synchronized void skipTurn() {
+        currentPlayerIndex = (currentPlayerIndex + 1) % players.size();
+        currentDice = 0;
+        phase = Phase.WAITING_FOR_ROLL;
+        movablePieceNumbers.clear();
+        lastAction = "";
+    }
 
     private void advanceTurn() {
         currentPlayerIndex = (currentPlayerIndex + 1) % players.size();

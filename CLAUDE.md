@@ -15,13 +15,24 @@ java -cp out Main
 ### 联机服务器
 ```powershell
 java -cp out server.GameServer
-# 可选指定端口：java -cp out server.GameServer 9877
+# 可选参数：
+#   java -cp out server.GameServer 9877              # 指定端口（向后兼容）
+#   java -cp out server.GameServer --port 9876       # 指定监听端口
+#   java -cp out server.GameServer --public-port 9877 # 指定公网映射端口
+#   java -cp out server.GameServer --no-upnp         # 禁用 UPnP 自动端口映射
 ```
+
+服务器启动时会自动：
+- 检测并显示所有局域网地址
+- 尝试 UPnP 自动端口映射（支持的路由器上自动开放公网端口）
+- 检测公网 IP（通过 STUN / HTTP 回退）
+- 退出时自动清理 UPnP 映射
 
 ### 联机客户端
 ```powershell
 java -cp out ui.NetworkLudoFrame
-# 可选指定地址端口：java -cp out ui.NetworkLudoFrame 192.168.1.100 9876
+# 无参数 → 弹出连接对话框（输入 IP 和端口）
+# 带参数 → 直接连接：java -cp out ui.NetworkLudoFrame 192.168.1.100 9876
 ```
 
 无 Maven/Gradle 等构建工具 — 直接用 `javac`。源码编码为 UTF-8。联机模式无第三方依赖，JSON 协议手动构建。
@@ -50,9 +61,9 @@ java -cp out ui.NetworkLudoFrame
 
 **跳子（Jump / 同色跳）**：52 格公共轨道上每种颜色有 13 个"同色格"（每 4 格一个，由 `absolutePosition % 4 == startOffset % 4` 判定）。棋子落在自己同色格时，自动再前进 4 步。跳子在正常移动后的踩子检查之后触发，触发后再次检查踩子。跳子不递归（跳后不再检查跳子）。
 
-**飞棋（Fly / 飞点传送）**：棋盘上有两组对称的飞点——绝对位置 13↔39 和 26↔0。棋子落在飞点时，飞向配对位置。仅当配对位置在棋子自身 progress 坐标系中为"向前"时触发，否则跳过。飞棋在跳子之后触发（若已跳子则不飞），触发后再次检查踩子。飞棋不递归。
+**飞棋（Fly / 飞点传送）**：每个玩家各有一个专属飞点，位于起点后 3 步处——蓝 4→48、绿 17→9、红 30→22、黄 43→35。棋子落在飞点时飞向配对位置（向前飞 44 步）。仅当配对位置在 progress 坐标系中为"向前"时触发。飞棋优先于跳子触发。飞棋不递归。
 
-**移动完整流程**（`Board.move()`）：1. 正常移动 → 2. 踩子 → 3. 跳子（若满足条件）→ 4. 踩子 → 5. 飞棋（若满足条件且未跳子）→ 6. 踩子。
+**移动完整流程**（`Board.move()`）：1. 正常移动 → 2. 踩子 → 3. 飞棋（优先，若满足条件）→ 4. 踩子 → 5. 跳子（未飞棋时，若满足条件）→ 6. 踩子。
 
 **控制台流程**（`Game.start()`）：
 1. 打印当前棋盘状态
@@ -87,9 +98,13 @@ java -cp out ui.NetworkLudoFrame
 - `GameState` — 包装现有 Board/Dice/Players，管理回合 Phase 枚举（`WAITING_FOR_ROLL` / `WAITING_FOR_PIECE` / `GAME_OVER`）。支持掷 6 连掷、无子自动跳回合。所有公开方法为 `synchronized`。
 
 **客户端（`src/ui/` + `src/network/`）：**
-- `GameClient` — TCP 客户端连接器，后台 reader 线程将每行 JSON 回调给 NetworkLudoFrame。
-- `NetworkLudoFrame` — Swing 窗口，与 LudoFrame 结构相似但由服务端 STATE 驱动。维护本地 Player/Piece 镜像（通过 `Piece.setProgress()` 同步）。`BoardPanel` 渲染类与本地游戏共享。
+- `GameClient` — TCP 客户端连接器，后台 reader 线程将每行 JSON 回调给 NetworkLudoFrame。连接超时 5 秒。
+- `NetworkLudoFrame` — Swing 窗口，与 LudoFrame 结构相似但由服务端 STATE 驱动。维护本地 Player/Piece 镜像（通过 `Piece.setProgress()` 同步）。`BoardPanel` 渲染类与本地游戏共享。无参数启动时弹出 `ConnectDialog` 输入地址端口。
 - 入口在 `NetworkLudoFrame.main()`。
+
+**网络工具（`src/network/`）：**
+- `NetworkUtil` — 纯静态工具类：`getAllLanIPs()` / `getBestLanIP()` 枚举网卡获取局域网地址；`getPublicIPviaSTUN()` 通过 STUN 协议获取公网 IP；`getPublicIPviaHTTP()` 通过 HTTP 服务回退获取公网 IP。
+- `UPnPClient` — UPnP IGD 协议实现（`AutoCloseable`）：SSDP 多播发现路由器 → 解析设备描述 XML → SOAP 请求 `AddPortMapping` / `DeletePortMapping` / `GetExternalIPAddress`。关闭时自动删除已创建的端口映射。
 
 **关键设计点：**
 - `Piece.setProgress(int)` — 专供客户端从服务端 STATE 同步 progress，服务端绝不调用。

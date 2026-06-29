@@ -47,13 +47,13 @@ public class GameServer {
                 Socket socket = serverSocket.accept();
 
                 synchronized (this) {
-                    if (clients.size() >= MAX_PLAYERS) {
+                    if (totalPlayers() >= MAX_PLAYERS) {
                         System.out.println("房间已满，拒绝新连接: " + socket.getInetAddress());
                         socket.close();
                         continue;
                     }
 
-                    int playerId = clients.size();
+                    int playerId = totalPlayers(); // 使用总人数避免与机器人 ID 冲突
                     ClientHandler client;
                     try {
                         client = new ClientHandler(socket, this, playerId);
@@ -138,7 +138,7 @@ public class GameServer {
         afterMoveBroadcast();
     }
 
-    /** 移动后的广播 + 机器人自动回合检测 */
+    /** 移动后的广播 + 机器人自动回合 */
     private synchronized void afterMoveBroadcast() {
         if (gameState.getPhase() == GameState.Phase.GAME_OVER) {
             broadcastState();
@@ -146,6 +146,7 @@ public class GameServer {
             System.out.println("游戏结束！获胜者: " + gameState.getWinnerName());
             return;
         }
+
         broadcastState();
 
         // 若当前玩家是机器人，自动执行回合
@@ -162,8 +163,28 @@ public class GameServer {
 
     // ---- 机器人 ----
 
+    /** 玩家是真人或机器人（非空闲） */
+    private boolean isActive(int playerId) {
+        return hasClient(playerId) || botIds.contains(playerId);
+    }
+
+    private boolean hasClient(int playerId) {
+        for (ClientHandler c : clients) {
+            if (c.getPlayerId() == playerId) return true;
+        }
+        return false;
+    }
+
     private boolean isBot(int playerId) {
         return botIds.contains(playerId);
+    }
+
+    /** 跳过所有空闲玩家，直到找到活跃玩家或游戏结束 */
+    private synchronized void skipIdlePlayers() {
+        while (gameState.getPhase() != GameState.Phase.GAME_OVER
+                && !isActive(gameState.getCurrentPlayer())) {
+            gameState.skipTurn();
+        }
     }
 
     private int totalPlayers() {
@@ -184,7 +205,7 @@ public class GameServer {
         botIds.add(botId);
 
         String botJson = "{\"type\":\"BOT_ADDED\",\"playerId\":" + botId
-                + ",\"playerName\":\"" + gameState.getPlayers().get(botId).getName() + "(机器人)\""
+                + ",\"playerName\":\"" + GameState.COLOR_NAMES[botId] + "(机器人)\""
                 + ",\"totalCount\":" + totalPlayers() + "}";
         broadcast(botJson);
 
@@ -200,18 +221,22 @@ public class GameServer {
             sendTo(requesterId, "{\"type\":\"ERROR\",\"message\":\"只有房主（玩家0）可以开始游戏。\"}");
             return;
         }
-        if (totalPlayers() < MAX_PLAYERS) {
-            sendTo(requesterId, "{\"type\":\"ERROR\",\"message\":\"人数不足（需要 4 人，当前 "
-                    + totalPlayers() + " 人），请添加机器人。\"}");
+        if (clients.isEmpty()) {
+            sendTo(requesterId, "{\"type\":\"ERROR\",\"message\":\"至少需要 1 名玩家。\"}");
             return;
         }
 
+        int total = totalPlayers();
+        gameState.initPlayers(total); // 按实际人数初始化玩家（1-4 人）
+
         gameStarted = true;
-        System.out.println("房主开始游戏！真人: " + clients.size() + ", 机器人: " + botIds.size());
+        System.out.println("房主开始游戏！总人数: " + total
+                + " (真人: " + clients.size() + ", 机器人: " + botIds.size() + ")");
+        redis.pushHistory("🎮 游戏开始！(" + total + "人)");
         broadcast(gameState.buildStartGameJson());
         broadcastState();
 
-        // 如果第一个回合是机器人，自动执行
+        // 如果当前玩家是机器人，自动执行
         if (isBot(gameState.getCurrentPlayer())) {
             scheduleBotTurn();
         }
@@ -233,10 +258,13 @@ public class GameServer {
                         // 自动掷骰
                         gameState.rollDice(botId);
                         redis.pushHistory(gameState.getLastAction());
+
                         broadcastState();
 
-                        // 若无可移动子 → 已自动跳回合，继续检查下一位
+                        // 若无可移动子 → 已自动跳回合
                         if (gameState.getPhase() != GameState.Phase.WAITING_FOR_PIECE) {
+                            broadcastState();
+                            // 下一位是机器人则继续，否则退出
                             if (isBot(gameState.getCurrentPlayer())) continue;
                             return;
                         }
@@ -346,18 +374,121 @@ public class GameServer {
 
     public static void main(String[] args) {
         int port = PORT;
-        if (args.length > 0) {
-            try {
-                port = Integer.parseInt(args[0]);
-            } catch (NumberFormatException e) {
-                System.out.println("无效端口号，使用默认端口 " + PORT);
+        int publicPort = port;
+        boolean useUPnP = true;
+
+        // 解析参数：--port <n>, --public-port <n>, --no-upnp
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case "--port":
+                    if (i + 1 < args.length) {
+                        try { port = Integer.parseInt(args[++i]); } catch (NumberFormatException ignored) {}
+                    }
+                    break;
+                case "--public-port":
+                    if (i + 1 < args.length) {
+                        try { publicPort = Integer.parseInt(args[++i]); } catch (NumberFormatException ignored) {}
+                    }
+                    break;
+                case "--no-upnp":
+                    useUPnP = false;
+                    break;
+                default:
+                    // 向后兼容：第一个非 -- 参数视为端口号
+                    try { port = Integer.parseInt(args[i]); } catch (NumberFormatException ignored) {}
+                    break;
             }
         }
+
+        System.out.println("============================================");
+        System.out.println("        飞行棋联机服务器");
+        System.out.println("============================================");
+        System.out.println("监听端口: " + port);
+        System.out.println();
+
+        // ---- 局域网地址 ----
+        String bestLanIP = network.NetworkUtil.getBestLanIP();
+        System.out.println("【局域网地址】");
+        for (String ip : network.NetworkUtil.getAllLanIPs()) {
+            System.out.println("  " + ip + ":" + port);
+        }
+        System.out.println();
+
+        // ---- UPnP 端口映射 ----
+        String publicIP = null;
+        boolean upnpSuccess = false;
+        network.UPnPClient upnpClient = null;
+
+        if (useUPnP) {
+            System.out.print("正在尝试 UPnP 端口映射... ");
+            try {
+                upnpClient = new network.UPnPClient(4000);
+                if (upnpClient.isAvailable()) {
+                    if (upnpClient.addPortMapping(bestLanIP, port, publicPort, "Ludo Game", "TCP")) {
+                        upnpSuccess = true;
+                        publicIP = upnpClient.getExternalIP();
+                        System.out.println("成功！");
+                    } else {
+                        publicIP = upnpClient.getExternalIP();
+                        System.out.println("映射失败（可能端口已被占用）");
+                    }
+                } else {
+                    System.out.println("未发现支持 UPnP 的路由器");
+                }
+            } catch (Exception e) {
+                System.out.println("失败: " + e.getMessage());
+            }
+        }
+
+        // ---- 显示公网地址 ----
+        if (upnpSuccess) {
+            System.out.println();
+            System.out.println("【公网地址（UPnP 自动映射）】");
+            System.out.println("  " + publicIP + ":" + publicPort);
+        } else {
+            // 尝试检测公网 IP
+            if (publicIP == null) {
+                publicIP = network.NetworkUtil.getPublicIPviaSTUN("stun.l.google.com", 19302, 3000);
+            }
+            if (publicIP == null) {
+                publicIP = network.NetworkUtil.getPublicIPviaHTTP("checkip.amazonaws.com", 3000);
+            }
+            if (publicIP != null) {
+                System.out.println();
+                System.out.println("【检测到公网 IP】" + publicIP);
+                System.out.println();
+                System.out.println("  ⚠ UPnP 端口映射未成功，如需公网联机，");
+                System.out.println("    请手动设置路由器端口转发：");
+                System.out.println("    内部 IP:   " + bestLanIP);
+                System.out.println("    内部端口:  " + port + " (TCP)");
+                System.out.println("    外部端口:  " + publicPort + " (TCP)");
+            }
+        }
+
+        System.out.println();
+        System.out.println("============================================");
+        System.out.println("等待玩家连接...");
+
+        // 注册 shutdown hook 清理 UPnP 映射
+        final network.UPnPClient upnp = upnpClient;
+        final int finalPublicPort = publicPort;
+        if (upnpSuccess && upnp != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("\n正在清理 UPnP 端口映射...");
+                upnp.deletePortMapping(finalPublicPort, "TCP");
+                System.out.println("已清理。再见！");
+            }));
+        }
+
         try {
             new GameServer(port).start();
         } catch (IOException e) {
             System.err.println("服务器启动失败: " + e.getMessage());
             System.exit(1);
+        } finally {
+            if (upnp != null) {
+                upnp.close();
+            }
         }
     }
 }

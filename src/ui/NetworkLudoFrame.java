@@ -7,12 +7,14 @@ import network.GameClient;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
@@ -124,7 +126,7 @@ public class NetworkLudoFrame extends JFrame {
                     setTitle("飞行棋 - 联机模式 [玩家" + myPlayerId + "]");
                     if (myPlayerId == 0) {
                         startButton.setEnabled(true);
-                        setStatusHtml("你是房主，请添加机器人并点击「开始游戏」。");
+                        setStatusHtml("你是房主，点击「开始游戏」即可（机器人自动补齐）。");
                     } else {
                         setStatusHtml("等待房主开始游戏...");
                     }
@@ -149,7 +151,7 @@ public class NetworkLudoFrame extends JFrame {
 
             case "START_GAME":
                 SwingUtilities.invokeLater(() -> {
-                    initPlayersFromStart();
+                    initPlayersFromJson(json); // 从 JSON 解析实际玩家列表
                     preGame = false;
                     botButton.setVisible(false);
                     startButton.setVisible(false);
@@ -188,14 +190,36 @@ public class NetworkLudoFrame extends JFrame {
     // ---- 状态同步 ----
 
     private void initPlayersFromStart() {
-        // 服务器已广播 START_GAME，重建 Player 列表
-        // Player 信息从 STATE 的 pieces 数组推断（不需要显式反序列化）
-        // 使用标准 4 色配置
+        // 已废弃，改用 initPlayersFromJson 从 START_GAME JSON 解析
+    }
+
+    /**
+     * 从 START_GAME 消息的 JSON 中解析玩家列表。
+     * 格式: {"type":"START_GAME","playerCount":2,"players":[{"name":"蓝方","offset":1},...]}
+     */
+    private void initPlayersFromJson(String json) {
         players.clear();
-        players.add(new Player("蓝方", 1));
-        players.add(new Player("绿方", 14));
-        players.add(new Player("红方", 27));
-        players.add(new Player("黄方", 40));
+        // 提取 players 数组内容
+        String playersJson = extractArray(json, "players");
+        if (playersJson == null) return;
+
+        // 解析每个 {"name":"...","offset":...} 对象
+        int pos = 0;
+        while (pos < playersJson.length()) {
+            int braceStart = playersJson.indexOf('{', pos);
+            if (braceStart < 0) break;
+            int braceEnd = playersJson.indexOf('}', braceStart);
+            if (braceEnd < 0) break;
+            String obj = playersJson.substring(braceStart + 1, braceEnd);
+
+            String name = extractString("{" + obj + "}", "name");
+            int offset = extractInt("{" + obj + "}", "offset");
+
+            if (name != null && offset > 0) {
+                players.add(new Player(name, offset));
+            }
+            pos = braceEnd + 1;
+        }
     }
 
     private void syncState(String json) {
@@ -206,9 +230,9 @@ public class NetworkLudoFrame extends JFrame {
         String ph = extractString(json, "phase");
         if (ph != null) phase = ph;
 
-        // 解析 pieces: [[-1,-1,-1,-1],...]
+        // 解析 pieces: [[-1,-1,-1,-1],...]（玩家人数可变）
         String piecesStr = extractArray(json, "pieces");
-        if (piecesStr != null && players.size() == 4) {
+        if (piecesStr != null && !players.isEmpty()) {
             syncPieces(piecesStr);
         }
 
@@ -242,8 +266,12 @@ public class NetworkLudoFrame extends JFrame {
         final String finalDisplay = display;
         setStatusHtml(finalDisplay);
 
-        // 骰子显示（-1 表示解析失败）
-        diceLabel.setText("骰子：" + (currentDice >= 0 ? String.valueOf(currentDice) : "?"));
+        // 骰子显示：有新的掷骰结果才更新，否则保留上一个玩家的点数
+        if (currentDice > 0) {
+            diceLabel.setText("骰子：" + currentDice);
+        } else if (currentDice == 0 && "WAITING_FOR_ROLL".equals(phase) && currentPlayerIndex == myPlayerId) {
+            diceLabel.setText("骰子：-");  // 轮到自己掷骰时才显示 -
+        }
 
         // 当前玩家标签
         if (currentPlayerIndex < players.size()) {
@@ -257,24 +285,28 @@ public class NetworkLudoFrame extends JFrame {
                 && phase.contains("WAITING_FOR_ROLL");
         rollButton.setEnabled(myTurn);
 
-        // 更新历史记录
+        // 更新历史记录（倒序显示：最早在上，最新在下）
         String histStr = extractArray(json, "history");
         if (histStr != null) {
-            StringBuilder histText = new StringBuilder();
-            // histStr 格式: "条目1","条目2","条目3"
-            // 逐个提取引号内的字符串
+            // 先收集所有条目到 list
+            java.util.List<String> entries = new java.util.ArrayList<>();
             int pos = 0;
             while (pos < histStr.length()) {
                 int qStart = histStr.indexOf('"', pos);
                 if (qStart < 0) break;
                 int qEnd = histStr.indexOf('"', qStart + 1);
                 if (qEnd < 0) break;
-                String entry = histStr.substring(qStart + 1, qEnd);
-                histText.append(entry).append("\n");
+                entries.add(histStr.substring(qStart + 1, qEnd));
                 pos = qEnd + 1;
             }
+            // 反转：最早的在上
+            java.util.Collections.reverse(entries);
+            StringBuilder histText = new StringBuilder();
+            for (String e : entries) {
+                histText.append(e).append("\n");
+            }
             historyArea.setText(histText.toString());
-            // 自动滚到底部
+            // 自动滚到底部（最新）
             historyArea.setCaretPosition(historyArea.getDocument().getLength());
         }
 
@@ -284,12 +316,12 @@ public class NetworkLudoFrame extends JFrame {
 
     private void syncPieces(String piecesStr) {
         // piecesStr 格式: "[[-1,-1,-1,-1],[-1,-1,-1,-1],[-1,-1,-1,-1],[-1,10,-1,-1]]"
-        // 提取每个内层数组
+        // 玩家数可变（1-4），每个玩家固定 4 枚棋子
         String inner = piecesStr.replace("[", "").replace("]", "");
         String[] rows = inner.split(",");
-        // rows 会有 16 个值: player 0's 4 pieces, player 1's 4 pieces, etc.
-        if (rows.length >= 16) {
-            for (int i = 0; i < 4 && i < players.size(); i++) {
+        int playerCount = players.size();
+        if (rows.length >= playerCount * 4) {
+            for (int i = 0; i < playerCount; i++) {
                 List<Piece> pieces = players.get(i).getPieces();
                 for (int j = 0; j < 4 && j < pieces.size(); j++) {
                     int progress = Integer.parseInt(rows[i * 4 + j].trim());
@@ -391,7 +423,7 @@ public class NetworkLudoFrame extends JFrame {
         centerPanel.add(historyScroll, BorderLayout.CENTER);
 
         // ---- 底部：规则提示 ----
-        JLabel hintLabel = new JLabel("<html><b>联机模式</b><br>房主（玩家0）可开始游戏<br>添加机器人补齐 4 人<br>5 或 6 起飞<br>⤴ 跳子 ✈ 飞棋<br>掷到 6 可再来一次</html>");
+        JLabel hintLabel = new JLabel("<html><b>联机模式</b><br>房主（玩家0）可开始游戏<br>支持 1-4 人对战<br>可添加机器人补位<br>5 或 6 起飞<br>⤴ 跳子 ✈ 飞棋<br>掷到 6 可再来一次</html>");
         hintLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
         hintLabel.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
         hintLabel.setForeground(new Color(75, 85, 99));
@@ -481,19 +513,143 @@ public class NetworkLudoFrame extends JFrame {
     // ---- 入口 ----
 
     public static void main(String[] args) {
-        String host = args.length > 0 ? args[0] : "localhost";
-        int port = 9876;
-        if (args.length > 1) {
-            try {
-                port = Integer.parseInt(args[1]);
-            } catch (NumberFormatException e) {
-                System.out.println("无效端口号，使用默认端口 " + port);
+        if (args.length >= 1) {
+            // 命令行模式：直接连接（向后兼容）
+            String host = args[0];
+            int port = 9876;
+            if (args.length > 1) {
+                try {
+                    port = Integer.parseInt(args[1]);
+                } catch (NumberFormatException e) {
+                    System.out.println("无效端口号，使用默认端口 " + port);
+                }
             }
+            final String h = host;
+            final int p = port;
+            SwingUtilities.invokeLater(() -> {
+                new NetworkLudoFrame(h, p).setVisible(true);
+            });
+        } else {
+            // 无参数：弹出连接对话框
+            SwingUtilities.invokeLater(() -> {
+                ConnectDialog dialog = new ConnectDialog(null);
+                dialog.setVisible(true);
+                if (dialog.isConfirmed()) {
+                    new NetworkLudoFrame(dialog.getHost(), dialog.getPort()).setVisible(true);
+                } else {
+                    System.exit(0);
+                }
+            });
         }
-        final String h = host;
-        final int p = port;
-        SwingUtilities.invokeLater(() -> {
-            new NetworkLudoFrame(h, p).setVisible(true);
-        });
+    }
+
+    /**
+     * 连接对话框 —— 让用户输入服务器地址和端口。
+     */
+    private static class ConnectDialog extends JDialog {
+        private boolean confirmed = false;
+        private String host = "localhost";
+        private int port = 9876;
+
+        private final JTextField hostField = new JTextField("localhost", 20);
+        private final JTextField portField = new JTextField("9876", 6);
+
+        ConnectDialog(JFrame parent) {
+            super(parent, "连接服务器", true);
+            setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+            setResizable(false);
+
+            JPanel panel = new JPanel(new BorderLayout(10, 12));
+            panel.setBorder(BorderFactory.createEmptyBorder(20, 24, 16, 24));
+            panel.setBackground(new Color(246, 248, 250));
+
+            // 标题
+            JLabel title = new JLabel("飞行棋联机");
+            title.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 22));
+            title.setHorizontalAlignment(SwingConstants.CENTER);
+            panel.add(title, BorderLayout.NORTH);
+
+            // 输入区
+            JPanel inputPanel = new JPanel(new BorderLayout(8, 8));
+            inputPanel.setOpaque(false);
+
+            JPanel addrPanel = new JPanel(new BorderLayout(4, 4));
+            addrPanel.setOpaque(false);
+            addrPanel.add(new JLabel("服务器地址："), BorderLayout.NORTH);
+            hostField.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 16));
+            addrPanel.add(hostField, BorderLayout.CENTER);
+
+            JPanel portPanel = new JPanel(new BorderLayout(4, 4));
+            portPanel.setOpaque(false);
+            portPanel.add(new JLabel("端口："), BorderLayout.NORTH);
+            portField.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 16));
+            portPanel.add(portField, BorderLayout.CENTER);
+
+            inputPanel.add(addrPanel, BorderLayout.CENTER);
+            inputPanel.add(portPanel, BorderLayout.EAST);
+
+            panel.add(inputPanel, BorderLayout.CENTER);
+
+            // 按钮
+            JPanel btnPanel = new JPanel(new BorderLayout(10, 0));
+            btnPanel.setOpaque(false);
+
+            JButton cancelBtn = new JButton("取消");
+            cancelBtn.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 14));
+            cancelBtn.addActionListener(e -> dispose());
+
+            JButton connectBtn = new JButton("连接");
+            connectBtn.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 16));
+            connectBtn.setBackground(new Color(22, 163, 74));
+            connectBtn.setForeground(Color.WHITE);
+            connectBtn.setFocusPainted(false);
+            connectBtn.addActionListener(e -> {
+                String h = hostField.getText().trim();
+                if (h.isEmpty()) {
+                    hostField.setBorder(BorderFactory.createLineBorder(Color.RED, 2));
+                    return;
+                }
+                int p;
+                try {
+                    p = Integer.parseInt(portField.getText().trim());
+                    if (p < 1 || p > 65535) throw new NumberFormatException();
+                } catch (NumberFormatException ex) {
+                    portField.setBorder(BorderFactory.createLineBorder(Color.RED, 2));
+                    return;
+                }
+                host = h;
+                port = p;
+                confirmed = true;
+                dispose();
+            });
+
+            // Enter 键触发连接
+            portField.addActionListener(connectBtn.getActionListeners()[0]);
+            hostField.addActionListener(connectBtn.getActionListeners()[0]);
+
+            btnPanel.add(cancelBtn, BorderLayout.WEST);
+            btnPanel.add(connectBtn, BorderLayout.EAST);
+            panel.add(btnPanel, BorderLayout.SOUTH);
+
+            // 提示
+            JLabel hint = new JLabel("输入房主的服务器地址和端口号");
+            hint.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+            hint.setForeground(new Color(107, 114, 128));
+            hint.setHorizontalAlignment(SwingConstants.CENTER);
+            hint.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+            panel.add(hint, BorderLayout.SOUTH);
+
+            add(panel);
+            pack();
+            setLocationRelativeTo(parent);
+
+            // 默认焦点
+            hostField.selectAll();
+            hostField.requestFocusInWindow();
+        }
+
+        boolean isConfirmed() { return confirmed; }
+        String getHost() { return host; }
+        int getPort() { return port; }
     }
 }
